@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bubble Shooter</title>
+  <style>
+    :root {
+      --bg: #14213d;
+      --panel: #1d2f55;
+      --text: #f4f1de;
+      --muted: #9fb0d0;
+      --accent: #ffd166;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+    }
+
+    body {
+      background: radial-gradient(circle at 50% 0%, #22407a 0%, var(--bg) 60%);
+      color: var(--text);
+      font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 12px;
+    }
+
+    header {
+      display: flex;
+      gap: 24px;
+      align-items: baseline;
+      width: min(480px, 100%);
+      justify-content: space-between;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 26px;
+      letter-spacing: .5px;
+    }
+
+    .stat {
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .stat b {
+      color: var(--accent);
+      font-size: 18px;
+    }
+
+    #wrap {
+      position: relative;
+      width: min(480px, 100%);
+    }
+
+    canvas {
+      width: 100%;
+      height: auto;
+      display: block;
+      background: var(--panel);
+      border-radius: 14px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, .45);
+      touch-action: none;
+      cursor: crosshair;
+    }
+
+    #overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      background: rgba(10, 18, 40, .82);
+      border-radius: 14px;
+      text-align: center;
+      padding: 20px;
+    }
+
+    #overlay.hidden {
+      display: none;
+    }
+
+    #overlay h2 {
+      margin: 0;
+      font-size: 32px;
+    }
+
+    #overlay p {
+      margin: 0;
+      color: var(--muted);
+      max-width: 300px;
+      line-height: 1.4;
+    }
+
+    button {
+      background: var(--accent);
+      color: #1b1b1b;
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 28px;
+      font-size: 17px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button:hover {
+      filter: brightness(1.08);
+    }
+
+    button:focus-visible {
+      outline: 3px solid #fff;
+      outline-offset: 3px;
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 13px;
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>Bubble Shooter</h1>
+    <div class="stat">Score <b id="score">0</b></div>
+    <div class="stat">Best <b id="best">0</b></div>
+  </header>
+
+  <div id="wrap">
+    <canvas id="game" width="480" height="640"></canvas>
+    <div id="overlay">
+      <h2 id="ovTitle">Bubble Shooter</h2>
+      <p id="ovText">Aim with the mouse or finger, click to shoot. Match 3 or more of the same color to pop them.</p>
+      <button id="startBtn">Play</button>
+    </div>
+  </div>
+  <div class="hint">Space or right-click swaps the next bubble</div>
+
+  <script>
+    (() => {
+      const canvas = document.getElementById('game');
+      const ctx = canvas.getContext('2d');
+      const W = canvas.width, H = canvas.height;
+
+      // Grid settings
+      const COLS = 12;
+      const R = W / (COLS * 2 + 1);          // bubble radius
+      const D = R * 2;
+      const ROW_H = R * Math.sqrt(3);
+      const MAX_ROWS = 14;                   // rows before game over line
+      const START_ROWS = 6;
+      const SHOTS_PER_NEW_ROW = 6;
+      const COLORS = ['#ef476f', '#ffd166', '#06d6a0', '#4cc9f0', '#b185db', '#ff9f1c'];
+      const SPEED = 14;
+
+      const shooter = { x: W / 2, y: H - 40 };
+
+      let grid, current, next, flying, particles, falling;
+      let score, best, shotsLeft, state, aim, colorsInPlay;
+
+      best = Number(localStorage.getItem('bubbleBest') || 0);
+      document.getElementById('best').textContent = best;
+
+      const overlay = document.getElementById('overlay');
+      const ovTitle = document.getElementById('ovTitle');
+      const ovText = document.getElementById('ovText');
+      const startBtn = document.getElementById('startBtn');
+
+      // Grid helpers
+      const rowOffset = r => (r % 2 === (offsetParity % 2) ? 0 : R);
+      let offsetParity = 0; // flips each time a new row is pushed so the pattern stays consistent
+      const cellX = (r, c) => R + c * D + rowOffset(r);
+      const cellY = r => R + r * ROW_H;
+      const colsInRow = r => (rowOffset(r) === 0 ? COLS : COLS - 1);
+
+      function neighbors(r, c) {
+        const odd = rowOffset(r) !== 0;
+        const dirs = odd
+          ? [[0, -1], [0, 1], [-1, 0], [-1, 1], [1, 0], [1, 1]]
+          : [[0, -1], [0, 1], [-1, -1], [-1, 0], [1, -1], [1, 0]];
+        const out = [];
+        for (const [dr, dc] of dirs) {
+          const nr = r + dr, nc = c + dc;
+          if (nr >= 0 && nr < MAX_ROWS + 2 && nc >= 0 && nc < colsInRow(nr)) out.push([nr, nc]);
+        }
+        return out;
+      }
+
+      function newGrid() {
+        grid = Array.from({ length: MAX_ROWS + 2 }, () => Array(COLS).fill(null));
+        offsetParity = 0;
+        for (let r = 0; r < START_ROWS; r++)
+          for (let c = 0; c < colsInRow(r); c++)
+            grid[r][c] = randColor(true);
+      }
+
+      function activeColors() {
+        const set = new Set();
+        for (const row of grid) for (const v of row) if (v !== null) set.add(v);
+        return [...set];
+      }
+
+      function randColor(initial = false) {
+        if (initial) return Math.floor(Math.random() * COLORS.length);
+        const act = activeColors();
+        if (act.length === 0) return Math.floor(Math.random() * COLORS.length);
+        return act[Math.floor(Math.random() * act.length)];
+      }
+
+      function reset() {
+        newGrid();
+        score = 0;
+        shotsLeft = SHOTS_PER_NEW_ROW;
+        particles = [];
+        falling = [];
+        flying = null;
+        aim = { x: W / 2, y: 0 };
+        current = randColor();
+        next = randColor();
+        updateScore(0);
+        state = 'play';
+      }
+
+      function updateScore(add) {
+        score += add;
+        document.getElementById('score').textContent = score;
+        if (score > best) {
+          best = score;
+          localStorage.setItem('bubbleBest', best);
+          document.getElementById('best').textContent = best;
+        }
+      }
+
+      // Input
+      function pointerPos(e) {
+        const rect = canvas.getBoundingClientRect();
+        const t = e.touches ? e.touches[0] : e;
+        return {
+          x: (t.clientX - rect.left) * (W / rect.width),
+          y: (t.clientY - rect.top) * (H / rect.height)
+        };
+      }
+      function setAim(e) { aim = pointerPos(e); }
+
+      canvas.addEventListener('mousemove', setAim);
+      canvas.addEventListener('touchmove', e => { setAim(e); e.preventDefault(); }, { passive: false });
+      canvas.addEventListener('touchstart', e => { setAim(e); e.preventDefault(); }, { passive: false });
+      canvas.addEventListener('mousedown', e => {
+        if (e.button === 2) { swap(); return; }
+        setAim(e); shoot();
+      });
+      canvas.addEventListener('touchend', e => { e.preventDefault(); shoot(); }, { passive: false });
+      canvas.addEventListener('contextmenu', e => { e.preventDefault(); });
+      window.addEventListener('keydown', e => {
+        if (e.code === 'Space') { e.preventDefault(); swap(); }
+      });
+
+      function swap() {
+        if (state !== 'play' || flying) return;
+        [current, next] = [next, current];
+      }
+
+      function shoot() {
+        if (state !== 'play' || flying) return;
+        let dx = aim.x - shooter.x, dy = aim.y - shooter.y;
+        // Prevent shooting downward / too flat
+        const minAngle = 0.12;
+        let ang = Math.atan2(-dy, dx);
+        ang = Math.max(minAngle, Math.min(Math.PI - minAngle, ang));
+        flying = {
+          x: shooter.x, y: shooter.y,
+          vx: Math.cos(ang) * SPEED, vy: -Math.sin(ang) * SPEED,
+          color: current
+        };
+        current = next;
+        next = randColor();
+      }
+
+      // Find the nearest empty cell to a point
+      function nearestCell(x, y) {
+        let best = null, bd = Infinity;
+        for (let r = 0; r < MAX_ROWS + 2; r++) {
+          for (let c = 0; c < colsInRow(r); c++) {
+            if (grid[r][c] !== null) continue;
+            const d = (cellX(r, c) - x) ** 2 + (cellY(r) - y) ** 2;
+            if (d < bd) { bd = d; best = [r, c]; }
+          }
+        }
+        return best;
+      }
+
+      function snap() {
+        const [r, c] = nearestCell(flying.x, flying.y);
+        grid[r][c] = flying.color;
+        const color = flying.color;
+        flying = null;
+
+        // Matching cluster
+        const cluster = floodSame(r, c, color);
+        if (cluster.length >= 3) {
+          for (const [cr, cc] of cluster) {
+            burst(cellX(cr, cc), cellY(cr), COLORS[color]);
+            grid[cr][cc] = null;
+          }
+          updateScore(cluster.length * 10);
+          dropFloating();
+        }
+
+        shotsLeft--;
+        if (cluster.length < 3 && shotsLeft <= 0) {
+          pushRow();
+          shotsLeft = SHOTS_PER_NEW_ROW;
+        } else if (cluster.length >= 3) {
+          shotsLeft = Math.min(SHOTS_PER_NEW_ROW, shotsLeft + 1);
+        }
+
+        // Make sure the loaded colors still exist on the board
+        const act = activeColors();
+        if (act.length && !act.includes(current)) current = act[Math.floor(Math.random() * act.length)];
+        if (act.length && !act.includes(next)) next = act[Math.floor(Math.random() * act.length)];
+
+        checkEnd();
+      }
+
+      function floodSame(r, c, color) {
+        const seen = new Set([r + ',' + c]);
+        const stack = [[r, c]];
+        const out = [];
+        while (stack.length) {
+          const [cr, cc] = stack.pop();
+          out.push([cr, cc]);
+          for (const [nr, nc] of neighbors(cr, cc)) {
+            const k = nr + ',' + nc;
+            if (!seen.has(k) && grid[nr][nc] === color) { seen.add(k); stack.push([nr, nc]); }
+          }
+        }
+        return out;
+      }
+
+      // Anything not connected to the ceiling falls
+      function dropFloating() {
+        const seen = new Set();
+        const stack = [];
+        for (let c = 0; c < colsInRow(0); c++) if (grid[0][c] !== null) { stack.push([0, c]); seen.add('0,' + c); }
+        while (stack.length) {
+          const [r, c] = stack.pop();
+          for (const [nr, nc] of neighbors(r, c)) {
+            const k = nr + ',' + nc;
+            if (!seen.has(k) && grid[nr][nc] !== null) { seen.add(k); stack.push([nr, nc]); }
+          }
+        }
+        let count = 0;
+        for (let r = 0; r < grid.length; r++) {
+          for (let c = 0; c < colsInRow(r); c++) {
+            if (grid[r][c] !== null && !seen.has(r + ',' + c)) {
+              falling.push({ x: cellX(r, c), y: cellY(r), vy: 0, vx: (Math.random() - 0.5) * 3, color: grid[r][c] });
+              grid[r][c] = null;
+              count++;
+            }
+          }
+        }
+        if (count) updateScore(count * 20);
+      }
+
+      function pushRow() {
+        // shift everything down one row, then flip the stagger so the new top row fits
+        for (let r = grid.length - 1; r > 0; r--) grid[r] = grid[r - 1].slice();
+        offsetParity++;
+        grid[0] = Array(COLS).fill(null);
+        for (let c = 0; c < colsInRow(0); c++) grid[0][c] = randColor(true);
+        // The row-parity flip changes which rows are offset; since we moved every row down by one,
+        // each old row keeps its original offset, so geometry stays consistent.
+      }
+
+      function checkEnd() {
+        let any = false, lowest = -1;
+        for (let r = 0; r < grid.length; r++)
+          for (let c = 0; c < colsInRow(r); c++)
+            if (grid[r][c] !== null) { any = true; lowest = r; }
+        if (!any) return finish(true);
+        if (lowest >= MAX_ROWS - 1) return finish(false);
+      }
+
+      function finish(win) {
+        state = win ? 'win' : 'lose';
+        ovTitle.textContent = win ? 'Board cleared!' : 'Game over';
+        ovText.textContent = `Score: ${score}. ` + (win ? 'Nice shooting.' : 'The bubbles reached the bottom.');
+        startBtn.textContent = 'Play again';
+        overlay.classList.remove('hidden');
+      }
+
+      function burst(x, y, color) {
+        for (let i = 0; i < 8; i++) {
+          const a = Math.random() * Math.PI * 2, s = 1 + Math.random() * 3;
+          particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 1, color });
+        }
+      }
+
+      // Update
+      function update() {
+        if (state !== 'play') return;
+
+        if (flying) {
+          // Sub-step to avoid tunneling
+          const steps = 3;
+          for (let i = 0; i < steps && flying; i++) {
+            flying.x += flying.vx / steps;
+            flying.y += flying.vy / steps;
+            if (flying.x < R) { flying.x = R; flying.vx *= -1; }
+            if (flying.x > W - R) { flying.x = W - R; flying.vx *= -1; }
+            if (flying.y <= R) { flying.y = R; snap(); break; }
+            // collision with any bubble
+            let hit = false;
+            for (let r = 0; r < grid.length && !hit; r++) {
+              for (let c = 0; c < colsInRow(r); c++) {
+                if (grid[r][c] === null) continue;
+                const dx = cellX(r, c) - flying.x, dy = cellY(r) - flying.y;
+                if (dx * dx + dy * dy < (D * 0.88) ** 2) { hit = true; break; }
+              }
+            }
+            if (hit) snap();
+          }
+        }
+
+        for (const p of particles) { p.x += p.vx; p.y += p.vy; p.vy += 0.1; p.life -= 0.03; }
+        particles = particles.filter(p => p.life > 0);
+
+        for (const f of falling) { f.vy += 0.6; f.y += f.vy; f.x += f.vx; }
+        falling = falling.filter(f => f.y < H + R);
+      }
+
+      // Drawing
+      function drawBubble(x, y, color, alpha = 1) {
+        ctx.globalAlpha = alpha;
+        const g = ctx.createRadialGradient(x - R * 0.35, y - R * 0.35, R * 0.1, x, y, R);
+        g.addColorStop(0, '#ffffff');
+        g.addColorStop(0.25, COLORS[color]);
+        g.addColorStop(1, shade(COLORS[color], -0.35));
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(x, y, R - 1, 0, Math.PI * 2); ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+
+      function shade(hex, amt) {
+        const n = parseInt(hex.slice(1), 16);
+        let r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+        r = Math.max(0, Math.min(255, r + 255 * amt));
+        g = Math.max(0, Math.min(255, g + 255 * amt));
+        b = Math.max(0, Math.min(255, b + 255 * amt));
+        return `rgb(${r | 0},${g | 0},${b | 0})`;
+      }
+
+      // Predict the aim path with wall bounces
+      function drawAimLine() {
+        if (flying || state !== 'play') return;
+        let ang = Math.atan2(-(aim.y - shooter.y), aim.x - shooter.x);
+        ang = Math.max(0.12, Math.min(Math.PI - 0.12, ang));
+        let x = shooter.x, y = shooter.y;
+        let vx = Math.cos(ang), vy = -Math.sin(ang);
+        ctx.fillStyle = 'rgba(255,255,255,.55)';
+        for (let i = 0; i < 90; i++) {
+          x += vx * 8; y += vy * 8;
+          if (x < R) { x = R; vx *= -1; }
+          if (x > W - R) { x = W - R; vx *= -1; }
+          if (y < R) break;
+          let stop = false;
+          for (let r = 0; r < grid.length && !stop; r++)
+            for (let c = 0; c < colsInRow(r); c++)
+              if (grid[r][c] !== null) {
+                const dx = cellX(r, c) - x, dy = cellY(r) - y;
+                if (dx * dx + dy * dy < (D * 0.9) ** 2) { stop = true; break; }
+              }
+          if (stop) break;
+          if (i % 2 === 0) { ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2); ctx.fill(); }
+        }
+      }
+
+      function draw() {
+        ctx.clearRect(0, 0, W, H);
+
+        // danger line
+        const dangerY = cellY(MAX_ROWS - 1) + R;
+        ctx.strokeStyle = 'rgba(239,71,111,.55)';
+        ctx.setLineDash([8, 8]);
+        ctx.beginPath(); ctx.moveTo(0, dangerY); ctx.lineTo(W, dangerY); ctx.stroke();
+        ctx.setLineDash([]);
+
+        if (!grid) return;
+
+        for (let r = 0; r < grid.length; r++)
+          for (let c = 0; c < colsInRow(r); c++)
+            if (grid[r][c] !== null) drawBubble(cellX(r, c), cellY(r), grid[r][c]);
+
+        for (const f of falling) drawBubble(f.x, f.y, f.color);
+        for (const p of particles) {
+          ctx.globalAlpha = Math.max(0, p.life);
+          ctx.fillStyle = p.color;
+          ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+
+        drawAimLine();
+        if (flying) drawBubble(flying.x, flying.y, flying.color);
+
+        // shooter and next bubble
+        if (state === 'play') {
+          if (!flying) drawBubble(shooter.x, shooter.y, current);
+          ctx.fillStyle = '#9fb0d0';
+          ctx.font = '13px sans-serif';
+          ctx.textAlign = 'left';
+          ctx.fillText('Next', 16, H - 44);
+          drawBubble(34, H - 24, next, 0.95);
+          ctx.textAlign = 'right';
+          ctx.fillText(`New row in ${shotsLeft}`, W - 16, H - 20);
+        }
+      }
+
+      function loop() {
+        update();
+        draw();
+        requestAnimationFrame(loop);
+      }
+
+      startBtn.addEventListener('click', () => {
+        overlay.classList.add('hidden');
+        reset();
+      });
+
+      // Draw an idle board behind the start overlay
+      state = 'menu';
+      newGrid();
+      particles = []; falling = []; flying = null;
+      aim = { x: W / 2, y: 0 }; current = 0; next = 1; score = 0; shotsLeft = SHOTS_PER_NEW_ROW;
+      loop();
+    })();
+  </script>
+</body>
+
+</html>
